@@ -22,7 +22,10 @@ shared_data = {
     'latest_front_frame': None,
     'latest_back_frame': None,
     'steering_input' : 0.0,
-    'acceleration_input' : 0.0
+    'acceleration_input' : 0.0,
+    'tap_state': 'IDLE',
+    'debug_info': "",
+    'debug_tokens': []
 }
 data_lock = threading.Lock()
 is_running = True
@@ -185,9 +188,9 @@ def read_single_camera(sock, window_name, data_key):
                     shared_data[data_key] = frame
                 
                 # You may disable this if you don't need to display the frames / This could effect the fps
-                frame_resized = cv2.resize(frame, (640, 480))
-                cv2.imshow(window_name, frame_resized)
-                cv2.waitKey(1)
+                # frame_resized = cv2.resize(frame, (640, 480))
+                # cv2.imshow(window_name, frame_resized)
+                # cv2.waitKey(1)
                 
     except Exception as e:
         pass
@@ -262,7 +265,40 @@ if __name__ == '__main__':
     try:
         # You need this to keep the main thread alive, otherwise the program will exit immediately
         while is_running:
-            time.sleep(1)
+            with data_lock:
+                front_frame = shared_data['latest_front_frame']
+                debug_info = shared_data.get('debug_info', "")
+                debug_tokens = shared_data.get('debug_tokens', []).copy()
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'): is_running = False
+
+            if front_frame is not None:
+                display_front = cv2.resize(front_frame, (640, 480))
+
+                if debug_info == "":
+                    cv2.putText(display_front, "WAITING FOR DATA...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                else:
+                    cv2.putText(display_front, f"{debug_info}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+                cv2.line(display_front, (0, 200), (640, 200), (255, 0, 0), 2)
+                cv2.line(display_front, (0, 440), (640, 440), (255, 0, 0), 2)
+                cv2.putText(display_front, "ROI BOUNDARY", (10, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+                cv2.line(display_front, (320 - int(20*0.22*2), 200), (320 - int(160*0.22*2), 480), (255, 255, 255), 2)
+                cv2.line(display_front, (320 + int(20*0.22*2), 200), (320 + int(160*0.22*2), 480), (255, 255, 255), 2)
+                cv2.putText(display_front, "SAFE CORRIDOR", (330, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+                for token in debug_tokens:
+                    if len(token) >= 5:
+                        ttype, x, y, w, h = token[:5]
+                        if ttype == 'GREEN': color = (0, 255, 0)
+                        elif ttype == 'RED': color = (0, 0, 255)
+                        else: color = (0, 255, 255) 
+                        cv2.rectangle(display_front, (x, y), (x+w, y+h), color, 2)
+                        cv2.putText(display_front, ttype, (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+                cv2.imshow("Phase 1 Baseline", display_front)
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt detected. Stopping system...")
         is_running = False
