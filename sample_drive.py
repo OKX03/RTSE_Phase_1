@@ -198,6 +198,76 @@ def read_front_camera_task():
 def read_back_camera_task():
     read_single_camera(back_camera_sock, "Back Camera", 'latest_back_frame')
 
+# ---------------------------------------------------------
+# Phase 1: Simplified Perception
+# ---------------------------------------------------------
+ROI_START_Y = 100
+
+def get_occupied_lanes(x, y, w, h):
+    actual_y = y + h/2 + ROI_START_Y
+    dist_to_horizon = actual_y - 80 
+    if dist_to_horizon <= 0: return []
+    
+    margin_width = dist_to_horizon * 0.857
+    margin_left = 160 - margin_width
+    margin_right = 160 + margin_width
+    
+    cx = x + w/2
+    if cx < margin_left or cx > margin_right: return []
+    
+    lane_half_width = dist_to_horizon * 0.22
+    left_bound = 160 - lane_half_width
+    right_bound = 160 + lane_half_width
+    
+    token_l = x
+    token_r = x + w
+    
+    lanes = []
+    if token_l <= left_bound and token_r >= margin_left: lanes.append(-1)
+    if token_l <= right_bound and token_r >= left_bound: lanes.append(0)
+    if token_l <= margin_right and token_r >= right_bound: lanes.append(1)
+    return lanes
+
+def detect_environment(front_frame):
+    small_frame = cv2.resize(front_frame, (320, 240))
+    roi_front = small_frame[ROI_START_Y:190, 0:320]
+    roi_hsv = cv2.cvtColor(roi_front, cv2.COLOR_BGR2HSV)
+    
+    mask_green = cv2.inRange(roi_hsv, np.array([35, 40, 40]), np.array([85, 255, 255]))
+    mask_red1 = cv2.inRange(roi_hsv, np.array([0, 120, 70]), np.array([10, 255, 255]))
+    mask_red2 = cv2.inRange(roi_hsv, np.array([170, 120, 70]), np.array([180, 255, 255]))
+    mask_red = mask_red1 | mask_red2
+    
+    contours_g, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    detected_objects = []
+    debug_tokens = []
+
+    for c in contours_red:
+        area = cv2.contourArea(c)
+        if area > 5:
+            x, y, w, h = cv2.boundingRect(c)
+            if 0.3 < float(w)/h < 3.0:
+                lanes = get_occupied_lanes(x, y, w, h)
+                if lanes:
+                    dist = (y + h/2 + ROI_START_Y) - 80
+                    detected_objects.append({'type': 'DANGER', 'lanes': lanes, 'dist': dist})
+                    debug_tokens.append(('DANGER_RED', x*2, (y+ROI_START_Y)*2, w*2, h*2))
+    
+    for c in contours_g:
+        area = cv2.contourArea(c)
+        if area > 5:
+            x, y, w, h = cv2.boundingRect(c)
+            if 0.3 < float(w)/h < 3.0:
+                lanes = get_occupied_lanes(x, y, w, h)
+                if lanes:
+                    dist = (y + h/2 + ROI_START_Y) - 80
+                    detected_objects.append({'type': 'GREEN', 'lanes': lanes, 'dist': dist})
+                    debug_tokens.append(('GREEN', x*2, (y+ROI_START_Y)*2, w*2, h*2))
+                    
+    return detected_objects, debug_tokens
+
 def processing_task():
     #This is where you write your image processing code to decide how to control the car
     #You can use libraries like OpenCV to process the image
@@ -208,7 +278,8 @@ def processing_task():
     
     if front_frame is not None:
         # write your processing here
-        pass
+        detected_objects, debug_tokens = detect_environment(front_frame)
+        print(f"[M2 TEST] Objects Detected: {len(detected_objects)}")
 
 def send_controls_task():
     #This is where you send the control commands to the car using the control_conn
