@@ -22,7 +22,11 @@ shared_data = {
     'latest_front_frame': None,
     'latest_back_frame': None,
     'steering_input' : 0.0,
-    'acceleration_input' : 0.0
+    'acceleration_input' : 1.0,  # Updated from new code
+    'tap_state': 'IDLE',         # Added from new code
+    'debug_info': "WAITING",     # Added from new code
+    'debug_tokens': [],          # Added from new code
+    'net_lane_position': 0       # Added from new code
 }
 data_lock = threading.Lock()
 is_running = True
@@ -185,9 +189,10 @@ def read_single_camera(sock, window_name, data_key):
                     shared_data[data_key] = frame
                 
                 # You may disable this if you don't need to display the frames / This could effect the fps
-                frame_resized = cv2.resize(frame, (640, 480))
-                cv2.imshow(window_name, frame_resized)
-                cv2.waitKey(1)
+                # NOTE: Disabled here because display and pause logic is now handled in the main thread loop
+                # frame_resized = cv2.resize(frame, (640, 480))
+                # cv2.imshow(window_name, frame_resized)
+                # cv2.waitKey(1)
                 
     except Exception as e:
         pass
@@ -236,7 +241,7 @@ def send_controls_task():
 # Main (Scheduler Initialization)
 # ---------------------------------------------------------
 if __name__ == '__main__':
-    print("Initializing RTSE Sample Drive...")
+    print("Initializing Phase 1 RTSE Drive...")
     
     # Initialize network connections
     threading.Thread(target=setup_control_server, daemon=True).start()
@@ -248,8 +253,10 @@ if __name__ == '__main__':
     # Period refers to the period of execution of the task in seconds
     # Priority refers to the priority of the task, higher priority means higher priority
     # Concurrency refers to the number of instances of the task that can run at the same time
-    t_front_camera = RTTask("ReadFrontCamera", period=0.005, priority=TaskPriority.HIGH, execute_func=read_front_camera_task)
-    t_back_camera = RTTask("ReadBackCamera", period=0.005, priority=TaskPriority.HIGH, execute_func=read_back_camera_task)
+    
+    # Periods and priorities updated based on new code
+    t_front_camera = RTTask("ReadFrontCamera", period=0.01, priority=TaskPriority.LOW, execute_func=read_front_camera_task)
+    t_back_camera = RTTask("ReadBackCamera", period=0.01, priority=TaskPriority.LOW, execute_func=read_back_camera_task)
     t_processing = RTTask("Processing", period=0.005, priority=TaskPriority.MEDIUM, execute_func=processing_task)
     t_controls = RTTask("SendControls", period=0.005, priority=TaskPriority.HIGH, execute_func=send_controls_task)
     
@@ -259,10 +266,62 @@ if __name__ == '__main__':
     t_processing.start()
     t_controls.start()
     
+    display_paused = False
+    last_display_frame = None
+
+    print("\n=============================================")
+    print(" PRESS 'p' TO PAUSE VIDEO FEED")
+    print(" PRESS 'q' TO QUIT")
+    print("=============================================\n")
+
     try:
         # You need this to keep the main thread alive, otherwise the program will exit immediately
+        # New code display logic replaces the simple time.sleep(1)
         while is_running:
-            time.sleep(1)
+            with data_lock:
+                front_frame = shared_data['latest_front_frame']
+                back_frame = shared_data.get('latest_back_frame', None)
+                debug_info = shared_data['debug_info']
+                debug_tokens = shared_data['debug_tokens'].copy()
+                steer_input = shared_data['steering_input']
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('p') or key == ord(' '): 
+                display_paused = not display_paused
+            elif key == ord('q'): 
+                is_running = False
+
+            if front_frame is not None and not display_paused:
+                display_front = cv2.resize(front_frame, (640, 480))
+                
+                cv2.putText(display_front, debug_info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                cv2.line(display_front, (0, 200), (640, 200), (255, 0, 0), 2)
+                cv2.line(display_front, (0, 440), (640, 440), (255, 0, 0), 2)
+                cv2.putText(display_front, "ROI BOUNDARY", (10, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+                cv2.line(display_front, (320 - int(20*0.22*2), 200), (320 - int(160*0.22*2), 480), (255, 255, 255), 2)
+                cv2.line(display_front, (320 + int(20*0.22*2), 200), (320 + int(160*0.22*2), 480), (255, 255, 255), 2)
+                
+                for token_data in debug_tokens:
+                    if len(token_data) >= 5:
+                        ttype, x, y, w, h = token_data[:5]
+                        color = (0, 0, 255) if 'RED' in ttype else (0, 255, 0)
+                        cv2.rectangle(display_front, (x, y), (x+w, y+h), color, 2)
+                        cv2.putText(display_front, ttype, (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+                last_display_frame = display_front
+                
+            if back_frame is not None and not display_paused:
+                display_back = cv2.resize(back_frame, (320, 240))
+                cv2.imshow("Back Camera", display_back)
+
+            if display_paused and last_display_frame is not None:
+                pause_frame = last_display_frame.copy()
+                cv2.putText(pause_frame, "PAUSED", (240, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+                cv2.imshow("Fast OpenCV Drive", pause_frame)
+            elif last_display_frame is not None:
+                cv2.imshow("Fast OpenCV Drive", last_display_frame)
+                
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt detected. Stopping system...")
         is_running = False
