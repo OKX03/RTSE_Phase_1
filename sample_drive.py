@@ -198,14 +198,17 @@ def read_front_camera_task():
 def read_back_camera_task():
     read_single_camera(back_camera_sock, "Back Camera", 'latest_back_frame')
 
-ROI_START_Y = 110 
+# ---------------------------------------------------------
+# Phase 1: Simplified Perception
+# ---------------------------------------------------------
+ROI_START_Y = 100
 
 def get_occupied_lanes(x, y, w, h):
     actual_y = y + h/2 + ROI_START_Y
     dist_to_horizon = actual_y - 80 
     if dist_to_horizon <= 0: return []
     
-    margin_width = dist_to_horizon * 0.9
+    margin_width = dist_to_horizon * 0.857
     margin_left = 160 - margin_width
     margin_right = 160 + margin_width
     
@@ -227,44 +230,42 @@ def get_occupied_lanes(x, y, w, h):
 
 def detect_environment(front_frame):
     small_frame = cv2.resize(front_frame, (320, 240))
-    roi_front = small_frame[ROI_START_Y:240, 0:320]
+    roi_front = small_frame[ROI_START_Y:190, 0:320]
     roi_hsv = cv2.cvtColor(roi_front, cv2.COLOR_BGR2HSV)
     
-    mask_green = cv2.inRange(roi_hsv, np.array([35, 70, 70]), np.array([85, 255, 255]))
+    mask_green = cv2.inRange(roi_hsv, np.array([35, 40, 40]), np.array([85, 255, 255]))
     mask_red1 = cv2.inRange(roi_hsv, np.array([0, 120, 70]), np.array([10, 255, 255]))
     mask_red2 = cv2.inRange(roi_hsv, np.array([170, 120, 70]), np.array([180, 255, 255]))
     mask_red = mask_red1 | mask_red2
-    mask_yellow = cv2.inRange(roi_hsv, np.array([15, 100, 100]), np.array([35, 255, 255]))
     
     contours_g, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours_r, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours_y, _ = cv2.findContours(mask_yellow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     detected_objects = []
     debug_tokens = []
-    debug_img = roi_front.copy() # M2 Mock Visualizer
 
-    def process_contours(contours, token_type):
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area > 10: 
-                x, y, w, h = cv2.boundingRect(c)
-                if 0.5 <= float(w)/h <= 1.5: 
-                    lanes = get_occupied_lanes(x, y, w, h)
-                    if lanes:
-                        detected_objects.append({'type': token_type, 'lanes': lanes, 'area': area, 'y': y})
-                        debug_tokens.append((token_type, x*2, (y+ROI_START_Y)*2, w*2, h*2))
-                        # M2 Independent testing UI
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), (255,255,255), 1)
-
-    process_contours(contours_g, 'GREEN')
-    process_contours(contours_r, 'RED')
-    process_contours(contours_y, 'YELLOW')
+    for c in contours_red:
+        area = cv2.contourArea(c)
+        if area > 5:
+            x, y, w, h = cv2.boundingRect(c)
+            if 0.3 < float(w)/h < 3.0:
+                lanes = get_occupied_lanes(x, y, w, h)
+                if lanes:
+                    dist = (y + h/2 + ROI_START_Y) - 80
+                    detected_objects.append({'type': 'DANGER', 'lanes': lanes, 'dist': dist})
+                    debug_tokens.append(('DANGER_RED', x*2, (y+ROI_START_Y)*2, w*2, h*2))
     
-    # M2: Remove this imshow line before final merge, used for independent local testing
-    cv2.imshow("M2 Independent Vision Test", debug_img)
-    cv2.waitKey(1)
-
+    for c in contours_g:
+        area = cv2.contourArea(c)
+        if area > 5:
+            x, y, w, h = cv2.boundingRect(c)
+            if 0.3 < float(w)/h < 3.0:
+                lanes = get_occupied_lanes(x, y, w, h)
+                if lanes:
+                    dist = (y + h/2 + ROI_START_Y) - 80
+                    detected_objects.append({'type': 'GREEN', 'lanes': lanes, 'dist': dist})
+                    debug_tokens.append(('GREEN', x*2, (y+ROI_START_Y)*2, w*2, h*2))
+                    
     return detected_objects, debug_tokens
 
 def processing_task():
@@ -278,6 +279,7 @@ def processing_task():
     if front_frame is not None:
         # write your processing here
         detected_objects, debug_tokens = detect_environment(front_frame)
+        print(f"[M2 TEST] Objects Detected: {len(detected_objects)}")
 
 def send_controls_task():
     #This is where you send the control commands to the car using the control_conn
