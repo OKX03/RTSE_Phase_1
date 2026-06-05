@@ -31,6 +31,14 @@ shared_data = {
 data_lock = threading.Lock()
 is_running = True
 
+# ----------------- MEMBER 4 ADDITIONS -----------------
+# Tapping control variables
+tap_state = 'IDLE'            
+tap_timer = 0
+active_steering_value = 0.0
+TAP_HOLD_FRAMES = 10         
+COOLDOWN_FRAMES = 20         
+
 # ---------------------------------------------------------
 # Real-Time Scheduling Framework (Do not change this in your code)
 # ---------------------------------------------------------
@@ -278,17 +286,18 @@ def processing_task():
     #You can use libraries like OpenCV to process the image
     #There is no limtation to the complexity of the processing task, you can use any libraries you want
     #Remember to use the shared_data to get the latest frame
-    with data_lock:
+    with data_lock: 
         front_frame = shared_data['latest_front_frame']
-    
+        
     if front_frame is not None:
         # write your processing here
         detected_objects, debug_tokens = detect_environment(front_frame)
-        print(f"[M2 TEST] Objects Detected: {len(detected_objects)}")
+        with data_lock: 
+            shared_data['debug_tokens'] = debug_tokens
 
 def send_controls_task():
     #This is where you send the control commands to the car using the control_conn
-    global control_conn
+    global control_conn, tap_state, tap_timer, active_steering_value
     if control_conn is None:
         return
     
@@ -296,12 +305,36 @@ def send_controls_task():
     #steering_input: -1.0 to 1.0 (left to right)
     #acceleration_input: -1.0 to 1.0 (reverse to forward)
     #this example always accelerate forward
-    steering_input = 0.0
-    acceleration_input = 1.0
+    with data_lock:
+        auto_steer = shared_data['steering_input']
+        accel_input = shared_data['acceleration_input']
+
+    # --- Autonomous Tapping Logic ---
+    if tap_state == 'IDLE':
+        if auto_steer != 0.0:
+            active_steering_value = auto_steer
+            tap_state = 'TAPPING'
+            tap_timer = TAP_HOLD_FRAMES
+            
+            with data_lock:
+                if auto_steer < -0.1: shared_data['net_lane_position'] = max(-1, shared_data.get('net_lane_position', 0) - 1)
+                elif auto_steer > 0.1: shared_data['net_lane_position'] = min(1, shared_data.get('net_lane_position', 0) + 1)
+        else: active_steering_value = 0.0
+    elif tap_state == 'TAPPING':
+        if tap_timer > 0: tap_timer -= 1
+        else:
+            active_steering_value = 0.0
+            tap_state = 'COOLDOWN'
+            tap_timer = COOLDOWN_FRAMES
+    elif tap_state == 'COOLDOWN':
+        active_steering_value = 0.0
+        if tap_timer > 0: tap_timer -= 1
+        else: tap_state = 'IDLE'
 
     try:
         # Pack and send the control command
-        data = struct.pack('ff', steering_input, acceleration_input)
+        # EXACT format from test_communication
+        data = struct.pack('ff', active_steering_value, accel_input)
         control_conn.sendall(data)
     except Exception as e:
         print(f"Control send error: {e}")
