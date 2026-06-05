@@ -31,14 +31,6 @@ shared_data = {
 data_lock = threading.Lock()
 is_running = True
 
-# ----------------- MEMBER 4 ADDITIONS -----------------
-# Tapping control variables
-tap_state = 'IDLE'            
-tap_timer = 0
-active_steering_value = 0.0
-TAP_HOLD_FRAMES = 10         
-COOLDOWN_FRAMES = 20         
-
 # ---------------------------------------------------------
 # Real-Time Scheduling Framework (Do not change this in your code)
 # ---------------------------------------------------------
@@ -212,7 +204,7 @@ def read_back_camera_task():
     read_single_camera(back_camera_sock, "Back Camera", 'latest_back_frame')
 
 # ---------------------------------------------------------
-# Phase 1: Simplified Perception
+# Phase 1: Simplified Perception & Decision (Inserted Additions)
 # ---------------------------------------------------------
 ROI_START_Y = 100
 
@@ -281,6 +273,52 @@ def detect_environment(front_frame):
                     
     return detected_objects, debug_tokens
 
+def evaluate_decision(detected_objects, current_lane):
+    target_steer = 0.0
+    debug_text = "CRUISING"
+
+    danger_lanes = set()
+    green_lanes = set()
+
+    for obj in detected_objects:
+        if obj['type'] == 'DANGER':
+            for lane in obj['lanes']: danger_lanes.add(lane)
+        elif obj['type'] == 'GREEN':
+            for lane in obj['lanes']: green_lanes.add(lane)
+
+    if 0 in danger_lanes:
+        if -1 not in danger_lanes:
+            target_steer = -1.0
+            debug_text = "<< EVADE LEFT"
+        elif 1 not in danger_lanes:
+            target_steer = 1.0
+            debug_text = "EVADE RIGHT >>"
+        else:
+            target_steer = 1.0
+            debug_text = "TRAPPED! PUSH RIGHT >>"
+        return target_steer, debug_text
+
+    if green_lanes:
+        if 0 in green_lanes:
+            target_steer = 0.0
+            debug_text = "SEEK GREEN AHEAD"
+        elif -1 in green_lanes and -1 not in danger_lanes:
+            target_steer = -1.0
+            debug_text = "<< SEEK GREEN LEFT"
+        elif 1 in green_lanes and 1 not in danger_lanes:
+            target_steer = 1.0
+            debug_text = "SEEK GREEN RIGHT >>"
+        return target_steer, debug_text
+
+    if current_lane < 0:
+        target_steer = 1.0
+        debug_text = "AUTO CENTER >>"
+    elif current_lane > 0:
+        target_steer = -1.0
+        debug_text = "<< AUTO CENTER"
+        
+    return target_steer, debug_text
+
 def processing_task():
     #This is where you write your image processing code to decide how to control the car
     #You can use libraries like OpenCV to process the image
@@ -288,16 +326,21 @@ def processing_task():
     #Remember to use the shared_data to get the latest frame
     with data_lock: 
         front_frame = shared_data['latest_front_frame']
+        current_lane = shared_data.get('net_lane_position', 0)
         
     if front_frame is not None:
         # write your processing here
         detected_objects, debug_tokens = detect_environment(front_frame)
-        with data_lock: 
+        target_steer, debug_text = evaluate_decision(detected_objects, current_lane)
+
+        with data_lock:
+            shared_data['steering_input'] = target_steer
             shared_data['debug_tokens'] = debug_tokens
+            shared_data['debug_info'] = f"AUTO: {debug_text}"
 
 def send_controls_task():
     #This is where you send the control commands to the car using the control_conn
-    global control_conn, tap_state, tap_timer, active_steering_value
+    global control_conn
     if control_conn is None:
         return
     
@@ -306,35 +349,12 @@ def send_controls_task():
     #acceleration_input: -1.0 to 1.0 (reverse to forward)
     #this example always accelerate forward
     with data_lock:
-        auto_steer = shared_data['steering_input']
-        accel_input = shared_data['acceleration_input']
-
-    # --- Autonomous Tapping Logic ---
-    if tap_state == 'IDLE':
-        if auto_steer != 0.0:
-            active_steering_value = auto_steer
-            tap_state = 'TAPPING'
-            tap_timer = TAP_HOLD_FRAMES
-            
-            with data_lock:
-                if auto_steer < -0.1: shared_data['net_lane_position'] = max(-1, shared_data.get('net_lane_position', 0) - 1)
-                elif auto_steer > 0.1: shared_data['net_lane_position'] = min(1, shared_data.get('net_lane_position', 0) + 1)
-        else: active_steering_value = 0.0
-    elif tap_state == 'TAPPING':
-        if tap_timer > 0: tap_timer -= 1
-        else:
-            active_steering_value = 0.0
-            tap_state = 'COOLDOWN'
-            tap_timer = COOLDOWN_FRAMES
-    elif tap_state == 'COOLDOWN':
-        active_steering_value = 0.0
-        if tap_timer > 0: tap_timer -= 1
-        else: tap_state = 'IDLE'
+        steering_input = shared_data['steering_input']
+    acceleration_input = 1.0
 
     try:
         # Pack and send the control command
-        # EXACT format from test_communication
-        data = struct.pack('ff', active_steering_value, accel_input)
+        data = struct.pack('ff', steering_input, acceleration_input)
         control_conn.sendall(data)
     except Exception as e:
         print(f"Control send error: {e}")
