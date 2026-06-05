@@ -276,10 +276,11 @@ if __name__ == '__main__':
             if front_frame is not None:
                 display_front = cv2.resize(front_frame, (640, 480))
 
-                if debug_info == "":
-                    cv2.putText(display_front, "WAITING FOR DATA...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                else:
-                    cv2.putText(display_front, f"{debug_info}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                if not debug_tokens:
+                    debug_tokens = [('GREEN', 200, 300, 40, 40), ('RED', 400, 250, 40, 40), ('YELLOW', 320, 350, 40, 40)]
+                    debug_info = "UI TEST | L:0 C:10 R:-50"
+
+                cv2.putText(display_front, f"{debug_info}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 cv2.line(display_front, (0, 200), (640, 200), (255, 0, 0), 2)
                 cv2.line(display_front, (0, 440), (640, 440), (255, 0, 0), 2)
