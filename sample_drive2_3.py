@@ -232,13 +232,11 @@ def detect_back_environment(back_frame):
         return []
         
     small_frame = cv2.resize(back_frame, (320, 240))
-    
-    # 彻底切掉天空！只扫描 y=130 到 240 的区域
+
     roi_back = small_frame[130:240, 40:280] 
     
     roi_hsv = cv2.cvtColor(roi_back, cv2.COLOR_BGR2HSV)
-    
-    # 涵盖青色车身和深蓝色车灯
+
     mask_car = cv2.inRange(roi_hsv, np.array([85, 150, 80]), np.array([130, 255, 255]))
     
     contours, _ = cv2.findContours(mask_car, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
