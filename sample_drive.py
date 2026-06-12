@@ -22,7 +22,11 @@ shared_data = {
     'latest_front_frame': None,
     'latest_back_frame': None,
     'steering_input' : 0.0,
-    'acceleration_input' : 0.0
+    'acceleration_input' : 1.0,  # Updated from new code
+    'tap_state': 'IDLE',         # Added from new code
+    'debug_info': "WAITING",     # Added from new code
+    'debug_tokens': [],          # Added from new code
+    'net_lane_position': 0       # Added from new code
 }
 data_lock = threading.Lock()
 is_running = True
@@ -185,9 +189,10 @@ def read_single_camera(sock, window_name, data_key):
                     shared_data[data_key] = frame
                 
                 # You may disable this if you don't need to display the frames / This could effect the fps
-                frame_resized = cv2.resize(frame, (640, 480))
-                cv2.imshow(window_name, frame_resized)
-                cv2.waitKey(1)
+                # NOTE: Disabled here because display and pause logic is now handled in the main thread loop
+                # frame_resized = cv2.resize(frame, (640, 480))
+                # cv2.imshow(window_name, frame_resized)
+                # cv2.waitKey(1)
                 
     except Exception as e:
         pass
@@ -198,17 +203,140 @@ def read_front_camera_task():
 def read_back_camera_task():
     read_single_camera(back_camera_sock, "Back Camera", 'latest_back_frame')
 
+# ---------------------------------------------------------
+# Phase 1: Simplified Perception & Decision (Inserted Additions)
+# ---------------------------------------------------------
+ROI_START_Y = 100
+
+def get_occupied_lanes(x, y, w, h):
+    actual_y = y + h/2 + ROI_START_Y
+    dist_to_horizon = actual_y - 80 
+    if dist_to_horizon <= 0: return []
+    
+    margin_width = dist_to_horizon * 0.857
+    margin_left = 160 - margin_width
+    margin_right = 160 + margin_width
+    
+    cx = x + w/2
+    if cx < margin_left or cx > margin_right: return []
+    
+    lane_half_width = dist_to_horizon * 0.22
+    left_bound = 160 - lane_half_width
+    right_bound = 160 + lane_half_width
+    
+    token_l = x
+    token_r = x + w
+    
+    lanes = []
+    if token_l <= left_bound and token_r >= margin_left: lanes.append(-1)
+    if token_l <= right_bound and token_r >= left_bound: lanes.append(0)
+    if token_l <= margin_right and token_r >= right_bound: lanes.append(1)
+    return lanes
+
+def detect_environment(front_frame):
+    small_frame = cv2.resize(front_frame, (320, 240))
+    roi_front = small_frame[ROI_START_Y:190, 0:320]
+    roi_hsv = cv2.cvtColor(roi_front, cv2.COLOR_BGR2HSV)
+    
+    mask_green = cv2.inRange(roi_hsv, np.array([35, 40, 40]), np.array([85, 255, 255]))
+    mask_red1 = cv2.inRange(roi_hsv, np.array([0, 120, 70]), np.array([10, 255, 255]))
+    mask_red2 = cv2.inRange(roi_hsv, np.array([170, 120, 70]), np.array([180, 255, 255]))
+    mask_red = mask_red1 | mask_red2
+    
+    contours_g, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    detected_objects = []
+    debug_tokens = []
+
+    for c in contours_red:
+        area = cv2.contourArea(c)
+        if area > 5:
+            x, y, w, h = cv2.boundingRect(c)
+            if 0.3 < float(w)/h < 3.0:
+                lanes = get_occupied_lanes(x, y, w, h)
+                if lanes:
+                    dist = (y + h/2 + ROI_START_Y) - 80
+                    detected_objects.append({'type': 'DANGER', 'lanes': lanes, 'dist': dist})
+                    debug_tokens.append(('DANGER_RED', x*2, (y+ROI_START_Y)*2, w*2, h*2))
+    
+    for c in contours_g:
+        area = cv2.contourArea(c)
+        if area > 5:
+            x, y, w, h = cv2.boundingRect(c)
+            if 0.3 < float(w)/h < 3.0:
+                lanes = get_occupied_lanes(x, y, w, h)
+                if lanes:
+                    dist = (y + h/2 + ROI_START_Y) - 80
+                    detected_objects.append({'type': 'GREEN', 'lanes': lanes, 'dist': dist})
+                    debug_tokens.append(('GREEN', x*2, (y+ROI_START_Y)*2, w*2, h*2))
+                    
+    return detected_objects, debug_tokens
+
+def evaluate_decision(detected_objects, current_lane):
+    target_steer = 0.0
+    debug_text = "CRUISING"
+
+    danger_lanes = set()
+    green_lanes = set()
+
+    for obj in detected_objects:
+        if obj['type'] == 'DANGER':
+            for lane in obj['lanes']: danger_lanes.add(lane)
+        elif obj['type'] == 'GREEN':
+            for lane in obj['lanes']: green_lanes.add(lane)
+
+    if 0 in danger_lanes:
+        if -1 not in danger_lanes:
+            target_steer = -1.0
+            debug_text = "<< EVADE LEFT"
+        elif 1 not in danger_lanes:
+            target_steer = 1.0
+            debug_text = "EVADE RIGHT >>"
+        else:
+            target_steer = 1.0
+            debug_text = "TRAPPED! PUSH RIGHT >>"
+        return target_steer, debug_text
+
+    if green_lanes:
+        if 0 in green_lanes:
+            target_steer = 0.0
+            debug_text = "SEEK GREEN AHEAD"
+        elif -1 in green_lanes and -1 not in danger_lanes:
+            target_steer = -1.0
+            debug_text = "<< SEEK GREEN LEFT"
+        elif 1 in green_lanes and 1 not in danger_lanes:
+            target_steer = 1.0
+            debug_text = "SEEK GREEN RIGHT >>"
+        return target_steer, debug_text
+
+    if current_lane < 0:
+        target_steer = 1.0
+        debug_text = "AUTO CENTER >>"
+    elif current_lane > 0:
+        target_steer = -1.0
+        debug_text = "<< AUTO CENTER"
+        
+    return target_steer, debug_text
+
 def processing_task():
     #This is where you write your image processing code to decide how to control the car
     #You can use libraries like OpenCV to process the image
     #There is no limtation to the complexity of the processing task, you can use any libraries you want
     #Remember to use the shared_data to get the latest frame
-    with data_lock:
+    with data_lock: 
         front_frame = shared_data['latest_front_frame']
-    
+        current_lane = shared_data.get('net_lane_position', 0)
+        
     if front_frame is not None:
         # write your processing here
-        pass
+        detected_objects, debug_tokens = detect_environment(front_frame)
+        target_steer, debug_text = evaluate_decision(detected_objects, current_lane)
+
+        with data_lock:
+            shared_data['steering_input'] = target_steer
+            shared_data['debug_tokens'] = debug_tokens
+            shared_data['debug_info'] = f"AUTO: {debug_text}"
 
 def send_controls_task():
     #This is where you send the control commands to the car using the control_conn
@@ -220,7 +348,8 @@ def send_controls_task():
     #steering_input: -1.0 to 1.0 (left to right)
     #acceleration_input: -1.0 to 1.0 (reverse to forward)
     #this example always accelerate forward
-    steering_input = 0.0
+    with data_lock:
+        steering_input = shared_data['steering_input']
     acceleration_input = 1.0
 
     try:
@@ -236,7 +365,7 @@ def send_controls_task():
 # Main (Scheduler Initialization)
 # ---------------------------------------------------------
 if __name__ == '__main__':
-    print("Initializing RTSE Sample Drive...")
+    print("Initializing Phase 1 RTSE Drive...")
     
     # Initialize network connections
     threading.Thread(target=setup_control_server, daemon=True).start()
@@ -248,8 +377,10 @@ if __name__ == '__main__':
     # Period refers to the period of execution of the task in seconds
     # Priority refers to the priority of the task, higher priority means higher priority
     # Concurrency refers to the number of instances of the task that can run at the same time
-    t_front_camera = RTTask("ReadFrontCamera", period=0.005, priority=TaskPriority.HIGH, execute_func=read_front_camera_task)
-    t_back_camera = RTTask("ReadBackCamera", period=0.005, priority=TaskPriority.HIGH, execute_func=read_back_camera_task)
+    
+    # Periods and priorities updated based on new code
+    t_front_camera = RTTask("ReadFrontCamera", period=0.01, priority=TaskPriority.LOW, execute_func=read_front_camera_task)
+    t_back_camera = RTTask("ReadBackCamera", period=0.01, priority=TaskPriority.LOW, execute_func=read_back_camera_task)
     t_processing = RTTask("Processing", period=0.005, priority=TaskPriority.MEDIUM, execute_func=processing_task)
     t_controls = RTTask("SendControls", period=0.005, priority=TaskPriority.HIGH, execute_func=send_controls_task)
     
@@ -259,10 +390,62 @@ if __name__ == '__main__':
     t_processing.start()
     t_controls.start()
     
+    display_paused = False
+    last_display_frame = None
+
+    print("\n=============================================")
+    print(" PRESS 'p' TO PAUSE VIDEO FEED")
+    print(" PRESS 'q' TO QUIT")
+    print("=============================================\n")
+
     try:
         # You need this to keep the main thread alive, otherwise the program will exit immediately
+        # New code display logic replaces the simple time.sleep(1)
         while is_running:
-            time.sleep(1)
+            with data_lock:
+                front_frame = shared_data['latest_front_frame']
+                back_frame = shared_data.get('latest_back_frame', None)
+                debug_info = shared_data['debug_info']
+                debug_tokens = shared_data['debug_tokens'].copy()
+                steer_input = shared_data['steering_input']
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('p') or key == ord(' '): 
+                display_paused = not display_paused
+            elif key == ord('q'): 
+                is_running = False
+
+            if front_frame is not None and not display_paused:
+                display_front = cv2.resize(front_frame, (640, 480))
+                
+                cv2.putText(display_front, debug_info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                cv2.line(display_front, (0, 200), (640, 200), (255, 0, 0), 2)
+                cv2.line(display_front, (0, 440), (640, 440), (255, 0, 0), 2)
+                cv2.putText(display_front, "ROI BOUNDARY", (10, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+                cv2.line(display_front, (320 - int(20*0.22*2), 200), (320 - int(160*0.22*2), 480), (255, 255, 255), 2)
+                cv2.line(display_front, (320 + int(20*0.22*2), 200), (320 + int(160*0.22*2), 480), (255, 255, 255), 2)
+                
+                for token_data in debug_tokens:
+                    if len(token_data) >= 5:
+                        ttype, x, y, w, h = token_data[:5]
+                        color = (0, 0, 255) if 'RED' in ttype else (0, 255, 0)
+                        cv2.rectangle(display_front, (x, y), (x+w, y+h), color, 2)
+                        cv2.putText(display_front, ttype, (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+                last_display_frame = display_front
+                
+            if back_frame is not None and not display_paused:
+                display_back = cv2.resize(back_frame, (320, 240))
+                cv2.imshow("Back Camera", display_back)
+
+            if display_paused and last_display_frame is not None:
+                pause_frame = last_display_frame.copy()
+                cv2.putText(pause_frame, "PAUSED", (240, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+                cv2.imshow("Fast OpenCV Drive", pause_frame)
+            elif last_display_frame is not None:
+                cv2.imshow("Fast OpenCV Drive", last_display_frame)
+                
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt detected. Stopping system...")
         is_running = False
