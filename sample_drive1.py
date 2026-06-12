@@ -20,12 +20,12 @@ CONTROL_PORT = 8081
 shared_data = {
     'latest_front_frame': None,
     'latest_back_frame': None,
-    'steering_input' : 0.0,        
-    'acceleration_input' : 1.0,    
-    'tap_state': 'IDLE',
-    'debug_info': "WAITING",
-    'debug_tokens': [],
-    'net_lane_position': 0
+    'steering_input' : 0.0,
+    'acceleration_input' : 1.0,
+    'tap_state': 'IDLE',      
+    'debug_info': "WAITING",  
+    'debug_tokens': [],       
+    'net_lane_position': 0   
 }
 data_lock = threading.Lock()
 is_running = True
@@ -38,7 +38,7 @@ TAP_HOLD_FRAMES = 10
 COOLDOWN_FRAMES = 20         
 
 # ---------------------------------------------------------
-# Real-Time Scheduling Framework (DO NOT CHANGE)
+# Real-Time Scheduling Framework (Do not change this in your code)
 # ---------------------------------------------------------
 class TaskPriority:
     HIGH = 1
@@ -46,6 +46,12 @@ class TaskPriority:
     LOW = 3
 
 class RTTask(threading.Thread):
+    """
+    Real-Time Task implementing:
+    - Concurrency (inherits threading.Thread)
+    - Task Period (enforced in run loop)
+    - Task Priority (logical priority assigned)
+    """
     def __init__(self, name, period, priority, execute_func):
         super().__init__()
         self.name = name
@@ -58,20 +64,26 @@ class RTTask(threading.Thread):
         print(f"[{self.name}] Started | Period: {self.period}s | Priority: {self.priority}")
         try:
             handle = ctypes.windll.kernel32.GetCurrentThread()
-            if self.priority == TaskPriority.HIGH: ctypes.windll.kernel32.SetThreadPriority(handle, 2)
-            elif self.priority == TaskPriority.MEDIUM: ctypes.windll.kernel32.SetThreadPriority(handle, 0)
-            elif self.priority == TaskPriority.LOW: ctypes.windll.kernel32.SetThreadPriority(handle, -2)
-        except Exception: pass
+            if self.priority == TaskPriority.HIGH:
+                ctypes.windll.kernel32.SetThreadPriority(handle, 2)
+            elif self.priority == TaskPriority.MEDIUM:
+                ctypes.windll.kernel32.SetThreadPriority(handle, 0)
+            elif self.priority == TaskPriority.LOW:
+                ctypes.windll.kernel32.SetThreadPriority(handle, -2)
+        except Exception as e:
+            pass
 
         while is_running:
             start_time = time.time()
             self.execute_func()
             exec_time = time.time() - start_time
             sleep_time = self.period - exec_time
-            if sleep_time > 0: time.sleep(sleep_time)
+            
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
 # ---------------------------------------------------------
-# Network Connection Setup (DO NOT CHANGE)
+# Network Connection Setup (Do not change this in your code)
 # ---------------------------------------------------------
 front_camera_sock = None
 back_camera_sock = None
@@ -79,6 +91,7 @@ control_conn = None
 
 def setup_cameras():
     global front_camera_sock, back_camera_sock
+    
     print("Connecting to Cameras...")
     front_connected = False
     back_connected = False
@@ -92,7 +105,8 @@ def setup_cameras():
                 front_camera_sock = s
                 print("Connected to Front Camera successfully.")
                 front_connected = True
-            except Exception: pass
+            except Exception:
+                pass
                 
         if not back_connected:
             try:
@@ -102,9 +116,11 @@ def setup_cameras():
                 back_camera_sock = s
                 print("Connected to Back Camera successfully.")
                 back_connected = True
-            except Exception: pass
+            except Exception:
+                pass
                 
-        if not (front_connected and back_connected): time.sleep(1)
+        if not (front_connected and back_connected):
+            time.sleep(1)
 
 def setup_control_server():
     global control_conn
@@ -121,10 +137,17 @@ def setup_control_server():
             print(f"Control client connected from {addr}")
             control_conn = conn
             break
-        except socket.timeout: continue
+        except socket.timeout:
+            continue
+
+# ---------------------------------------------------------
+# Task Implementations (This is where you write your tasks)
+# ---------------------------------------------------------
 
 def read_single_camera(sock, data_key):
-    if sock is None: return
+    #This function reads the latest frame from the camera socket and stores it in the shared data
+    if sock is None: 
+        return
     try:
         sock.settimeout(None)
         length_bytes = sock.recv(4)
@@ -162,16 +185,18 @@ def read_single_camera(sock, data_key):
                     with data_lock: shared_data[data_key] = frame
     except Exception: pass
 
-def read_front_camera_task(): read_single_camera(front_camera_sock, 'latest_front_frame')
-def read_back_camera_task(): read_single_camera(back_camera_sock, 'latest_back_frame')
+def read_front_camera_task(): 
+    read_single_camera(front_camera_sock, 'latest_front_frame')
+
+def read_back_camera_task(): 
+    read_single_camera(back_camera_sock, 'latest_back_frame')
 
 # ---------------------------------------------------------
-# Phase 1: Simplified Perception & Decision
+# Simplified Perception & Decision
 # ---------------------------------------------------------
 ROI_START_Y = 100
 
 def get_occupied_lanes(x, y, w, h):
-    # Determines if object is in Left (-1), Center (0), or Right (1) lane
     actual_y = y + h/2 + ROI_START_Y
     dist_to_horizon = actual_y - 80 
     if dist_to_horizon <= 0: return []
@@ -198,23 +223,22 @@ def get_occupied_lanes(x, y, w, h):
 
 def detect_environment(front_frame):
     small_frame = cv2.resize(front_frame, (320, 240))
-    # Crop to avoid self car hood/lights
     roi_front = small_frame[ROI_START_Y:190, 0:320]
     roi_hsv = cv2.cvtColor(roi_front, cv2.COLOR_BGR2HSV)
     
-    # Phase 1: Only Red and Green tokens
     mask_green = cv2.inRange(roi_hsv, np.array([35, 40, 40]), np.array([85, 255, 255]))
     mask_red1 = cv2.inRange(roi_hsv, np.array([0, 120, 70]), np.array([10, 255, 255]))
     mask_red2 = cv2.inRange(roi_hsv, np.array([170, 120, 70]), np.array([180, 255, 255]))
     mask_red = mask_red1 | mask_red2
-    
+    mask_yellow = cv2.inRange(roi_hsv, np.array([15, 100, 100]), np.array([35, 255, 255]))
+
     contours_g, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_yellow, _ = cv2.findContours(mask_yellow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     detected_objects = []
     debug_tokens = []
 
-    # Detect RED (Danger)
     for c in contours_red:
         area = cv2.contourArea(c)
         if area > 5:
@@ -225,8 +249,18 @@ def detect_environment(front_frame):
                     dist = (y + h/2 + ROI_START_Y) - 80
                     detected_objects.append({'type': 'DANGER', 'lanes': lanes, 'dist': dist})
                     debug_tokens.append(('DANGER_RED', x*2, (y+ROI_START_Y)*2, w*2, h*2))
+
+    for c in contours_yellow:
+        area = cv2.contourArea(c)
+        if area > 5:
+            x, y, w, h = cv2.boundingRect(c)
+            if 0.3 < float(w)/h < 3.0:
+                lanes = get_occupied_lanes(x, y, w, h)
+                if lanes:
+                    dist = (y + h/2 + ROI_START_Y) - 80
+                    detected_objects.append({'type': 'DANGER', 'lanes': lanes, 'dist': dist})
+                    debug_tokens.append(('DANGER_YELLOW', x*2, (y+ROI_START_Y)*2, w*2, h*2))
     
-    # Detect GREEN (Bonus)
     for c in contours_g:
         area = cv2.contourArea(c)
         if area > 5:
@@ -254,7 +288,7 @@ def evaluate_decision(detected_objects, current_lane):
         elif obj['type'] == 'GREEN':
             for lane in obj['lanes']: green_lanes.add(lane)
 
-    # 1. Highest Priority: Evade Danger directly ahead
+    # Highest Priority: Evade Danger directly ahead
     if 0 in danger_lanes:
         if -1 not in danger_lanes:
             target_steer = -1.0
@@ -268,7 +302,7 @@ def evaluate_decision(detected_objects, current_lane):
             debug_text = "TRAPPED! PUSH RIGHT >>"
         return target_steer, debug_text
 
-    # 2. Medium Priority: Seek Green if safe
+    # Medium Priority: Seek Green if safe
     if green_lanes:
         if 0 in green_lanes:
             target_steer = 0.0
@@ -281,7 +315,7 @@ def evaluate_decision(detected_objects, current_lane):
             debug_text = "SEEK GREEN RIGHT >>"
         return target_steer, debug_text
 
-    # 3. Lowest Priority: Auto-Center
+    # Lowest Priority: Auto-Center
     if current_lane < 0:
         target_steer = 1.0
         debug_text = "AUTO CENTER >>"
@@ -292,11 +326,16 @@ def evaluate_decision(detected_objects, current_lane):
     return target_steer, debug_text
 
 def processing_task():
+    #This is where you write your image processing code to decide how to control the car
+    #You can use libraries like OpenCV to process the image
+    #There is no limtation to the complexity of the processing task, you can use any libraries you want
+    #Remember to use the shared_data to get the latest frame
     with data_lock: 
         front_frame = shared_data['latest_front_frame']
         current_lane = shared_data.get('net_lane_position', 0)
         
     if front_frame is not None:
+        # write your processing here
         detected_objects, debug_tokens = detect_environment(front_frame)
         target_steer, debug_text = evaluate_decision(detected_objects, current_lane)
 
@@ -306,9 +345,15 @@ def processing_task():
             shared_data['debug_info'] = f"AUTO: {debug_text}"
 
 def send_controls_task():
+    #This is where you send the control commands to the car using the control_conn
     global control_conn, tap_state, tap_timer, active_steering_value
-    if control_conn is None: return
+    if control_conn is None: 
+        return
     
+    #these are the variables used to control the car
+    #steering_input: -1.0 to 1.0 (left to right)
+    #acceleration_input: -1.0 to 1.0 (reverse to forward)
+    #this example always accelerate forward
     with data_lock:
         auto_steer = shared_data['steering_input']
         accel_input = shared_data['acceleration_input']
@@ -336,10 +381,12 @@ def send_controls_task():
         else: tap_state = 'IDLE'
 
     try:
-        # EXACT format from test_communication
+        # Pack and send the control command
         data = struct.pack('ff', active_steering_value, accel_input)
         control_conn.sendall(data)
-    except Exception: control_conn = None
+    except Exception as e:
+        print(f"Control send error: {e}")
+        control_conn = None
 
 
 # ---------------------------------------------------------
@@ -348,15 +395,26 @@ def send_controls_task():
 if __name__ == '__main__':
     print("Initializing Phase 1 RTSE Drive...")
     
+    # Initialize network connections
     threading.Thread(target=setup_control_server, daemon=True).start()
     threading.Thread(target=setup_cameras, daemon=True).start()
     
-    t_ctrl = RTTask("SendControls", period=0.005, priority=TaskPriority.HIGH, execute_func=send_controls_task)
-    t_proc = RTTask("Processing", period=0.005, priority=TaskPriority.MEDIUM, execute_func=processing_task)
-    t_front = RTTask("ReadFrontCamera", period=0.01, priority=TaskPriority.LOW, execute_func=read_front_camera_task)
-    t_back = RTTask("ReadBackCamera", period=0.01, priority=TaskPriority.LOW, execute_func=read_back_camera_task)
+    print("\n--- Starting Real-Time Tasks (awaiting connections dynamically) ---\n")
     
-    t_front.start(); t_back.start(); t_ctrl.start(); t_proc.start()
+    # This is where you define tasks with explicit Scheduling parameters (Concurrency, Priority, Period)
+    # Period refers to the period of execution of the task in seconds
+    # Priority refers to the priority of the task, higher priority means higher priority
+    # Concurrency refers to the number of instances of the task that can run at the same time
+    t_front_camera = RTTask("ReadFrontCamera", period=0.01, priority=TaskPriority.LOW, execute_func=read_front_camera_task)
+    t_back_camera = RTTask("ReadBackCamera", period=0.01, priority=TaskPriority.LOW, execute_func=read_back_camera_task)
+    t_processing = RTTask("Processing", period=0.005, priority=TaskPriority.MEDIUM, execute_func=processing_task)
+    t_controls = RTTask("SendControls", period=0.005, priority=TaskPriority.HIGH, execute_func=send_controls_task)
+    
+    # Start tasks to run concurrently
+    t_front_camera.start()
+    t_back_camera.start()
+    t_processing.start()
+    t_controls.start()
     
     display_paused = False
     last_display_frame = None
@@ -367,6 +425,7 @@ if __name__ == '__main__':
     print("=============================================\n")
 
     try:
+        # You need this to keep the main thread alive, otherwise the program will exit immediately
         while is_running:
             with data_lock:
                 front_frame = shared_data['latest_front_frame']
@@ -376,27 +435,22 @@ if __name__ == '__main__':
                 steer_input = shared_data['steering_input']
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('p') or key == ord(' '):
+            if key == ord('p') or key == ord(' '): 
                 display_paused = not display_paused
-            elif key == ord('q'):
+            elif key == ord('q'): 
                 is_running = False
 
             if front_frame is not None and not display_paused:
                 display_front = cv2.resize(front_frame, (640, 480))
                 
-                # Debug Text
                 cv2.putText(display_front, debug_info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                
-                # Draw ROI bounds
                 cv2.line(display_front, (0, 200), (640, 200), (255, 0, 0), 2)
                 cv2.line(display_front, (0, 440), (640, 440), (255, 0, 0), 2)
                 cv2.putText(display_front, "ROI BOUNDARY", (10, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
 
-                # Draw Safe Corridor
                 cv2.line(display_front, (320 - int(20*0.22*2), 200), (320 - int(160*0.22*2), 480), (255, 255, 255), 2)
                 cv2.line(display_front, (320 + int(20*0.22*2), 200), (320 + int(160*0.22*2), 480), (255, 255, 255), 2)
                 
-                # Draw Bounding Boxes
                 for token_data in debug_tokens:
                     if len(token_data) >= 5:
                         ttype, x, y, w, h = token_data[:5]
@@ -413,12 +467,26 @@ if __name__ == '__main__':
             if display_paused and last_display_frame is not None:
                 pause_frame = last_display_frame.copy()
                 cv2.putText(pause_frame, "PAUSED", (240, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
-                cv2.imshow("Fast OpenCV Drive", pause_frame)
+                cv2.imshow("Front Camera", pause_frame)
             elif last_display_frame is not None:
-                cv2.imshow("Fast OpenCV Drive", last_display_frame)
+                cv2.imshow("Front Camera", last_display_frame)
                 
-    except KeyboardInterrupt: is_running = False
+    except KeyboardInterrupt:
+        print("\nKeyboard Interrupt detected. Stopping system...")
+        is_running = False
 
-    t_front.join(); t_back.join(); t_proc.join(); t_ctrl.join()
+    # This is to make sure that the tasks are terminated cleanly
+    t_front_camera.join()
+    t_back_camera.join()
+    t_processing.join()
+    t_controls.join()
+    
+    # This is to close all the connections
+    if front_camera_sock:
+        front_camera_sock.close()
+    if back_camera_sock:
+        back_camera_sock.close()
+    if control_conn:
+        control_conn.close()
     cv2.destroyAllWindows()
     print("System terminated cleanly.")
